@@ -1,0 +1,403 @@
+// FlightCompare TN - PostgreSQL schema (Prisma ORM)
+// Normalized relational model with explicit indexes and constraints.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum TripType {
+  ONE_WAY
+  ROUND_TRIP
+  MULTI_CITY
+}
+
+enum CabinClass {
+  ECONOMY
+  PREMIUM_ECONOMY
+  BUSINESS
+  FIRST
+}
+
+enum OfferStatus {
+  AVAILABLE
+  STALE
+  EXPIRED
+}
+
+enum NotificationType {
+  PRICE_ALERT
+  SYSTEM
+  RECOMMENDATION
+}
+
+enum OfferDirection {
+  OUTBOUND
+  INBOUND
+}
+
+// ---------------------------------------------------------------------------
+// Users & security
+// ---------------------------------------------------------------------------
+
+model User {
+  id                String                 @id @default(cuid())
+  firstName         String
+  lastName          String
+  email             String                 @unique
+  passwordHash      String
+  role              Role                   @default(USER)
+  preferredLanguage String                 @default("fr")
+  preferredCurrency String                 @default("TND")
+  isActive          Boolean                @default(true)
+  lastLoginAt       DateTime?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+
+  searches          FlightSearch[]
+  favorites         Favorite[]
+  priceAlerts       PriceAlert[]
+  notifications     Notification[]
+  preferences       UserPreference?
+  resetTokens       PasswordResetToken[]
+  aiRecommendations AiRecommendation[]
+  auditLogs         AuditLog[]
+
+  @@index([createdAt])
+  @@index([role])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model UserPreference {
+  id                 String     @id @default(cuid())
+  userId             String     @unique
+  user               User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferredAirlines  String[]   @default([])
+  maxStops           Int?
+  preferredCabin     CabinClass?
+  emailNotifications Boolean    @default(true)
+  updatedAt          DateTime   @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Reference data
+// ---------------------------------------------------------------------------
+
+model Airport {
+  id          String  @id @default(cuid())
+  iataCode    String  @unique @db.VarChar(3)
+  name        String
+  city        String
+  country     String
+  countryCode String  @db.VarChar(2)
+  latitude    Float?
+  longitude   Float?
+  timezone    String?
+
+  searchesAsOrigin      FlightSearch[]  @relation("SearchOrigin")
+  searchesAsDestination FlightSearch[]  @relation("SearchDestination")
+  segmentsAsOrigin      FlightSegment[] @relation("SegmentOrigin")
+  segmentsAsDestination FlightSegment[] @relation("SegmentDestination")
+  alertsAsOrigin        PriceAlert[]    @relation("AlertOrigin")
+  alertsAsDestination   PriceAlert[]    @relation("AlertDestination")
+  pricesAsOrigin        PriceHistory[]  @relation("PriceOrigin")
+  pricesAsDestination   PriceHistory[]  @relation("PriceDestination")
+
+  @@index([city])
+  @@index([country])
+}
+
+model Airline {
+  id      String  @id @default(cuid())
+  iataCode String @unique @db.VarChar(3)
+  name    String
+  logoUrl String?
+
+  offers   FlightOffer[]
+  segments FlightSegment[]
+  prices   PriceHistory[]
+
+  @@index([name])
+}
+
+// ---------------------------------------------------------------------------
+// Providers
+// ---------------------------------------------------------------------------
+
+model FlightProvider {
+  id           String   @id @default(cuid())
+  name         String   @unique
+  providerType String
+  enabled      Boolean  @default(true)
+  // Non-sensitive configuration only (endpoint labels, caps, flags).
+  // Credentials live exclusively in environment variables.
+  configuration Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  offers     FlightOffer[]
+  prices     PriceHistory[]
+  requestLog ApiRequestLog[]
+}
+
+// ---------------------------------------------------------------------------
+// Searches & offers
+// ---------------------------------------------------------------------------
+
+model FlightSearch {
+  id                   String     @id @default(cuid())
+  userId               String?
+  user                 User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  originAirportId      String
+  originAirport        Airport    @relation("SearchOrigin", fields: [originAirportId], references: [id])
+  destinationAirportId String
+  destinationAirport   Airport    @relation("SearchDestination", fields: [destinationAirportId], references: [id])
+  departureDate        DateTime   @db.Date
+  returnDate           DateTime?  @db.Date
+  tripType             TripType   @default(ONE_WAY)
+  adults               Int        @default(1)
+  children             Int        @default(0)
+  infants              Int        @default(0)
+  cabinClass           CabinClass @default(ECONOMY)
+  // Multi-city legs: [{ origin, destination, departureDate }]
+  legs                 Json?
+  currency             String     @default("TND") @db.VarChar(3)
+  resultCount          Int        @default(0)
+  createdAt            DateTime   @default(now())
+
+  offers FlightOffer[]
+
+  @@index([userId, createdAt])
+  @@index([originAirportId, destinationAirportId, departureDate])
+  @@index([createdAt])
+}
+
+model FlightOffer {
+  id                  String       @id @default(cuid())
+  searchId            String
+  search              FlightSearch @relation(fields: [searchId], references: [id], onDelete: Cascade)
+  providerId          String
+  provider            FlightProvider @relation(fields: [providerId], references: [id])
+  providerOfferId     String
+  airlineId           String?
+  airline             Airline?     @relation(fields: [airlineId], references: [id])
+  originalPrice       Decimal      @db.Decimal(12, 2)
+  originalCurrency    String       @db.VarChar(3)
+  convertedPrice      Decimal?     @db.Decimal(12, 2)
+  convertedCurrency   String?      @db.VarChar(3)
+  exchangeRate        Decimal?     @db.Decimal(18, 6)
+  exchangeRateAt      DateTime?
+  departureTime       DateTime
+  arrivalTime         DateTime
+  durationMinutes     Int
+  stops               Int          @default(0)
+  cabinClass          CabinClass   @default(ECONOMY)
+  baggageInformation  Json?
+  fareConditions      String?
+  refundable          Boolean?
+  bookingUrl          String?
+  retrievedAt         DateTime     @default(now())
+  expiresAt           DateTime?
+  status              OfferStatus  @default(AVAILABLE)
+  isDemo              Boolean      @default(false)
+  isEstimated         Boolean      @default(false)
+  createdAt           DateTime     @default(now())
+
+  segments          FlightSegment[]
+  favorites         Favorite[]
+  aiRecommendations AiRecommendation[]
+
+  @@unique([searchId, providerId, providerOfferId])
+  @@index([searchId, originalPrice])
+  @@index([searchId, durationMinutes])
+  @@index([retrievedAt])
+  @@index([airlineId])
+}
+
+model FlightSegment {
+  id                   String        @id @default(cuid())
+  flightOfferId        String
+  flightOffer          FlightOffer    @relation(fields: [flightOfferId], references: [id], onDelete: Cascade)
+  originAirportId      String
+  originAirport        Airport       @relation("SegmentOrigin", fields: [originAirportId], references: [id])
+  destinationAirportId String
+  destinationAirport   Airport       @relation("SegmentDestination", fields: [destinationAirportId], references: [id])
+  airlineId            String?
+  airline              Airline?      @relation(fields: [airlineId], references: [id])
+  flightNumber         String
+  departureTime        DateTime
+  arrivalTime          DateTime
+  durationMinutes      Int
+  direction            OfferDirection @default(OUTBOUND)
+  legIndex             Int           @default(0)
+  position             Int           @default(0)
+
+  @@index([flightOfferId, legIndex, position])
+}
+
+// ---------------------------------------------------------------------------
+// Price intelligence
+// ---------------------------------------------------------------------------
+
+model PriceHistory {
+  id                   String         @id @default(cuid())
+  route                  String
+  originAirportId      String
+  originAirport        Airport        @relation("PriceOrigin", fields: [originAirportId], references: [id])
+  destinationAirportId String
+  destinationAirport   Airport        @relation("PriceDestination", fields: [destinationAirportId], references: [id])
+  departureDate        DateTime       @db.Date
+  providerId           String
+  provider             FlightProvider @relation(fields: [providerId], references: [id])
+  airlineId            String?
+  airline              Airline?       @relation(fields: [airlineId], references: [id])
+  price                Decimal        @db.Decimal(12, 2)
+  currency             String         @db.VarChar(3)
+  // DEMO_PROVIDER | LIVE_PROVIDER | ALERT_CHECK
+  source               String         @default("LIVE_PROVIDER")
+  recordedAt           DateTime       @default(now())
+
+  @@index([originAirportId, destinationAirportId, departureDate, recordedAt])
+  @@index([recordedAt])
+}
+
+model Favorite {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flightOfferId String
+  flightOffer  FlightOffer @relation(fields: [flightOfferId], references: [id], onDelete: Cascade)
+  createdAt    DateTime    @default(now())
+
+  @@unique([userId, flightOfferId])
+  @@index([userId, createdAt])
+}
+
+model PriceAlert {
+  id                   String     @id @default(cuid())
+  userId               String
+  user                 User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  originAirportId      String
+  originAirport        Airport    @relation("AlertOrigin", fields: [originAirportId], references: [id])
+  destinationAirportId String
+  destinationAirport   Airport    @relation("AlertDestination", fields: [destinationAirportId], references: [id])
+  departureDate        DateTime   @db.Date
+  returnDate           DateTime?  @db.Date
+  targetPrice          Decimal    @db.Decimal(12, 2)
+  currency             String     @default("TND") @db.VarChar(3)
+  enabled              Boolean    @default(true)
+  lastCheckedAt        DateTime?
+  lastObservedPrice    Decimal?   @db.Decimal(12, 2)
+  lastNotifiedPrice    Decimal?   @db.Decimal(12, 2)
+  createdAt            DateTime   @default(now())
+
+  @@index([userId, createdAt])
+  @@index([enabled, lastCheckedAt])
+}
+
+model ExchangeRate {
+  id           String   @id @default(cuid())
+  baseCurrency String   @db.VarChar(3)
+  quoteCurrency String  @db.VarChar(3)
+  rate         Decimal  @db.Decimal(18, 8)
+  source       String   @default("static")
+  fetchedAt    DateTime @default(now())
+
+  @@unique([baseCurrency, quoteCurrency])
+  @@index([quoteCurrency])
+}
+
+// ---------------------------------------------------------------------------
+// Notifications, AI, logs
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  message   String
+  type      NotificationType @default(SYSTEM)
+  read      Boolean          @default(false)
+  metadata  Json?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, read, createdAt])
+}
+
+model AiRecommendation {
+  id           String      @id @default(cuid())
+  userId       String?
+  user         User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  flightOfferId String?
+  flightOffer  FlightOffer? @relation(fields: [flightOfferId], references: [id], onDelete: Cascade)
+  searchId     String?
+  score        Float
+  reason       String
+  source       String      @default("heuristic")
+  createdAt    DateTime    @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model ApiRequestLog {
+  id           String         @id @default(cuid())
+  providerId   String
+  provider     FlightProvider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  endpoint     String
+  status       Int?
+  success      Boolean        @default(true)
+  durationMs   Int
+  errorCode    String?
+  errorMessage String?
+  createdAt    DateTime       @default(now())
+
+  @@index([providerId, createdAt])
+  @@index([success, createdAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String
+  entity    String
+  entityId  String?
+  metadata  Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+model NewsletterSubscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  locale    String   @default("fr")
+  createdAt DateTime @default(now())
+}

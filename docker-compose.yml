@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: flightcompare-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-flightcompare_tn}
+      POSTGRES_USER: ${POSTGRES_USER:-flightcompare}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flightcompare_dev_2026}
+    # Host port 5433 by default because a native PostgreSQL service already
+    # listens on 5432 on this machine. Change POSTGRES_PORT in .env to 5432
+    # if that port is free on your system.
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - flightcompare_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flightcompare} -d ${POSTGRES_DB:-flightcompare_tn}"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  flightcompare_pgdata:
+    name: flightcompare_pgdata
